@@ -1,0 +1,350 @@
+<link rel="import" href="../polymer/polymer.html">
+
+<dom-module id="barcoder-element">
+  <template>
+    <style>
+      :host {
+        display: block;
+      }
+    </style>
+    <video hidden=true id="video" width="{{width}}" height="{{height}}" autoplay></video>
+    <canvas id="canvas" width="{{width}}" height="{{height}}"></canvas>
+    <input value="{{digits}}"></input>
+    <button on-tap=_onRestart>ReScan</button>
+  </template>
+
+  <script>
+    Polymer({
+
+      is: 'barcoder-element',
+
+      properties: {
+        /**
+         * Set width for video capture width
+         *
+         * @attribute width
+         */
+        width: {
+          type: Number,
+          value: 320,
+        },
+        /**
+         * Set height for video capture height
+         *
+         * @attribute height
+         */
+        height: {
+          type: Number,
+          value: 240,
+        },
+        /**
+         * Quality reflects the reliability of the detected barcode
+         *
+         * @attribute quality
+         */
+        quality: {
+          type: Number,
+          value: 0.60,
+        },
+        /**
+         * B/W threshold for bar detection
+         *
+         * @attribute threshold
+         */
+        threshold: {
+          type: Number,
+          value: 150,
+        },
+        /**
+         * recognized barcode
+         *
+         * @attribute digits
+         */
+        digits: {
+          type: Number,
+          notify: true,
+        },
+        timer: {
+          type: Object,
+        },
+
+      },
+      _onRestart: function() {
+        this.timer = setInterval(this.processImage.bind(this) , 50);
+      },
+      ready: function() {
+        var canvas = this.$.canvas,
+        context = canvas.getContext("2d"),
+        video = this.$.video,
+        videoObj = { "video": true },
+        errBack = function(error) {
+          console.log("Video capture error: ", error.code);
+        };
+        this.timer = setInterval(this.processImage.bind(this) , 50);
+        // Put video listeners into place
+        if(navigator.getUserMedia) { // Standard
+          navigator.getUserMedia(videoObj, function(stream) {
+            video.src = stream;
+            video.play();
+          }, errBack);
+        } else if(navigator.webkitGetUserMedia) { // WebKit-prefixed
+          navigator.webkitGetUserMedia(videoObj, function(stream){
+            video.src = window.URL.createObjectURL(stream);
+            video.play();
+          }, errBack);
+        }
+        else if(navigator.mozGetUserMedia) { // Firefox-prefixed
+          navigator.mozGetUserMedia(videoObj, function(stream){
+            video.src = window.URL.createObjectURL(stream);
+            video.play();
+          }, errBack);
+        }
+      },
+
+      processImage: function() {
+        this.digits = null;
+        var canvas = this.$.canvas;
+        var result = false;
+        context = canvas.getContext("2d");
+        video = this.$.video;
+        videoObj = { "video": true };
+        context.drawImage(video, 0, 0, this.width, this.height);
+
+        result = this.convertToGrayScale(context);
+
+        this.drawOverlay(context, result);
+      },
+      drawOverlay: function(context, success) {
+		    context.strokeStyle = 'rgba(256,0,0,0.7)';
+        if(success == true) {
+          clearInterval(this.timer);
+          context.strokeStyle = 'rgba(0,256,0,0.7)';
+        }
+		    context.lineWidth = 5;
+		    context.beginPath();
+		    context.moveTo(this.width/10, this.height/2);
+		    context.lineTo(this.width/1.1, this.height/2);
+
+        context.stroke();
+      },
+      convertToGrayScale: function(context) {
+
+        var bars = [];
+        var pixels = [];
+        var binary = [];
+        var pixelBars = [];
+
+        // read one line of pixels right of the middle
+        var imgd = context.getImageData(this.width/10, this.height/2, this.width/1.1, 1);
+		    var rgbpixels = imgd.data;
+        var imgd1 = context.getImageData(this.width/10, (this.height/2)-1, this.width/1.1, 1);
+		    var rgbpixels1 = imgd1.data;
+        var imgd2 = context.getImageData(this.width/10, (this.height/2)-2, this.width/1.1, 1);
+		    var rgbpixels2 = imgd1.data;
+
+        for (var i = 0, ii = rgbpixels.length; i < ii; i++) {
+			       rgbpixels[i] = (rgbpixels[i] + rgbpixels1[i] + rgbpixels2[i])/3
+		    }
+        // convert to grayscale respecting luminance
+        for (var i = 0, ii = rgbpixels.length; i < ii; i = i + 4) {
+			       pixels.push(Math.round(rgbpixels[i] * 0.2126 + rgbpixels[i + 1] * 0.7152 + rgbpixels[ i + 2] * 0.0722));
+		    }
+
+        // normalize
+		    var min = Math.min.apply(null, pixels);
+		    var max = Math.max.apply(null, pixels);
+
+        // convert to binary
+		    for (var i = 0, ii = pixels.length; i < ii; i++) {
+			    if (Math.round((pixels[i] - min) / (max - min) * 255) > this.threshold) {
+				    binary.push(1);
+			    } else {
+				    binary.push(0);
+			    }
+		    }
+
+        // determine bar widths
+		    var current = binary[0];
+		    var count = 0;
+
+		    for (var i = 0, ii = binary.length; i < ii; i++) {
+			    if (binary[i] == current) {
+				    count++;
+			    } else {
+				    pixelBars.push(count);
+				    count = 1;
+				    current = binary[i]
+			    }
+		    }
+		    pixelBars.push(count);
+
+        // quality check
+		    if (pixelBars.length < (3 + 24 + 5 + 24 + 3 + 1)) {
+			    return;
+		    }
+
+	      // find starting sequence
+		    var startIndex = 0;
+		    var minFactor = 0.5;
+		    var maxFactor = 1.5;
+
+		    for (var i = 3, ii = pixelBars.length; i < ii; i++) {
+			    var refLength = (pixelBars[i] + pixelBars[i-1] + pixelBars[i-2]) / 3;
+			  if ((pixelBars[i] > (minFactor * refLength) || pixelBars[i] < (maxFactor * refLength))
+				    && (pixelBars[i-1] > (minFactor * refLength) || pixelBars[i-1] < (maxFactor * refLength))
+				    && (pixelBars[i-2] > (minFactor * refLength) || pixelBars[i-2] < (maxFactor * refLength))
+				    && (pixelBars[i-3] > 3 * refLength)
+			  ) {
+				  startIndex = i - 2;
+				  break;
+			    }
+		    }
+
+	      // return if no starting sequence found
+		    if (startIndex == 0) {
+			    return;
+		    }
+
+		    // discard leading and trailing patterns
+		    pixelBars = pixelBars.slice(startIndex, startIndex + 3 + 24 + 5 + 24 + 3);
+
+
+		    // calculate relative widths
+		    var ref = (pixelBars[0] + pixelBars[1] + pixelBars[2]) / 3;
+
+		    for (var i = 0, ii = pixelBars.length; i < ii; i++) {
+			      bars.push(Math.round(pixelBars[i] / ref * 100) / 100);
+		    }
+        return this.decode(bars);
+
+      },
+      decode: function(bars) {
+
+        var upc = {
+        		'0': [3, 2, 1, 1],
+        		'1': [2, 2, 2, 1],
+        		'2': [2, 1, 2, 2],
+        		'3': [1, 4, 1, 1],
+        		'4': [1, 1, 3, 2],
+        		'5': [1, 2, 3, 1],
+        		'6': [1, 1, 1, 4],
+        		'7': [1, 3, 1, 2],
+        		'8': [1, 2, 1, 3],
+        		'9': [3, 1, 1, 2]
+        };
+        var check = {
+        		'oooooo': '0',
+        		'ooeoee': '1',
+        		'ooeeoe': '2',
+        		'ooeeeo': '3',
+        		'oeooee': '4',
+        		'oeeooe': '5',
+        		'oeeeoo': '6',
+        		'oeoeoe': '7',
+        		'oeoeeo': '8',
+        		'oeeoeo': '9'
+      	}
+		    // determine parity first digit and reverse sequence if necessary
+		    var first = this.normalize(bars.slice(3, 3 + 4), 7);
+		    if (!this.isOdd(Math.round(first[1] + first[3]))) {
+			    bars = bars.reverse();
+		    }
+
+		    // split into digits
+		    var digits = [
+			    this.normalize(bars.slice(3, 3 + 4), 7),
+			    this.normalize(bars.slice(7, 7 + 4), 7),
+			    this.normalize(bars.slice(11, 11 + 4), 7),
+			    this.normalize(bars.slice(15, 15 + 4), 7),
+			    this.normalize(bars.slice(19, 19 + 4), 7),
+			    this.normalize(bars.slice(23, 23 + 4), 7),
+			    this.normalize(bars.slice(32, 32 + 4), 7),
+			    this.normalize(bars.slice(36, 36 + 4), 7),
+			    this.normalize(bars.slice(40, 40 + 4), 7),
+			    this.normalize(bars.slice(44, 44 + 4), 7),
+			    this.normalize(bars.slice(48, 48 + 4), 7),
+			    this.normalize(bars.slice(52, 52 + 4), 7)
+		    ]
+
+        // determine parity and reverse if necessary
+		    var parities = [];
+
+		    for (var i = 0; i < 6; i++) {
+			    if (this.parity(digits[i])) {
+				    parities.push('o');
+			    } else {
+				    parities.push('e');
+				    digits[i] = digits[i].reverse();
+			    }
+		    }
+
+		    // identify digits
+			  var result = [];
+		    var quality = 0;
+
+		    for (var i = 0, ii = digits.length; i < ii; i++) {
+          var distance = 9;
+			    var bestKey = '';
+			    for (key in upc) {
+				    if (this.maxDistance(digits[i], upc[key]) < distance) {
+					    distance = this.maxDistance(digits[i], upc[key]);
+					    bestKey = key;
+				    }
+			    }
+			    result.push(bestKey);
+			    if (distance > quality) {
+				    quality = distance;
+			    }
+		    }
+
+		    // check digit
+		    var checkDigit = check[parities.join('')];
+		    // output
+		    if((quality < this.quality) && (checkDigit != null)) {
+				    this.digits = (checkDigit + result.join(''));
+            return true;
+		    }
+      },
+      normalize: function(input, total) {
+		    var sum = 0;
+		    var result = [];
+		    for (var i = 0, ii = input.length; i < ii; i++) {
+			    sum = sum + input[i];
+		    }
+		    for (var i = 0, ii = input.length; i < ii; i++) {
+			    result.push(input[i] / sum * total);
+		    }
+		    return result;
+	    },
+      isOdd: function(num) {
+		    return num % 2;
+	    },
+	    maxDistance: function(a, b) {
+		    var distance = 0;
+		    for (var i = 0, ii = a.length; i < ii; i++) {
+			    if (Math.abs(a[i] - b[i]) > distance) {
+				    distance = Math.abs(a[i] - b[i]);
+			    }
+		    }
+		    return distance;
+      },
+	    parity: function(digit) {
+		    return this.isOdd(Math.round(digit[1] + digit[3]));
+	    },
+      drawBars: function(context, binary) {
+		    for (var i = 0, ii = binary.length; i < ii; i++) {
+			    if (binary[i] == 1) {
+				    context.strokeStyle = '#fff';
+			    } else {
+				    context.strokeStyle = '#000';
+			    }
+			    context.lineWidth = 3;
+			    context.beginPath();
+			    context.moveTo(start + i, height * 0.5);
+			    context.lineTo(start + i + 1, height * 0.5);
+			    context.stroke();
+		    }
+      },
+    });
+  </script>
+</dom-module>
